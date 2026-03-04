@@ -12,13 +12,21 @@ from tkinter import filedialog, ttk
 
 from config import APP_NAME, APP_VERSION, WHISPER_MODELS, DEFAULT_MODEL
 from teams_transcriber.audio import extract_audio
+from teams_transcriber.diarizer import diarize
 from teams_transcriber.merger import merge_consecutive
 from teams_transcriber.output_writer import write_output
 from teams_transcriber.settings import AppSettings
-from teams_transcriber.synchronizer import detect_offset, synchronize
-from teams_transcriber.transcript_parser import parse_transcript
+from teams_transcriber.synchronizer import (
+    assign_speakers_from_diarization,
+    detect_offset,
+    synchronize,
+)
+from teams_transcriber.transcript_parser import is_single_speaker, parse_transcript
 from teams_transcriber.whisper_runner import transcribe
 from teams_transcriber.gui.theme import THEME as T
+
+# 話者分離モード
+DIARIZATION_MODES = ["自動", "常に音声話者分離", "使用しない"]
 
 
 class App:
@@ -53,6 +61,9 @@ class App:
         self.settings.set("last_mp4_dir", os.path.dirname(self.mp4_var.get()))
         self.settings.set("last_transcript_dir", os.path.dirname(self.transcript_var.get()))
         self.settings.set("whisper_model", self.model_var.get())
+        self.settings.set("proxy_url", self.proxy_var.get().strip())
+        self.settings.set("hf_token", self.hf_token_var.get().strip())
+        self.settings.set("diarization_mode", self.diarization_var.get())
         self.settings.save()
 
     # ── UI構築 ──
@@ -67,6 +78,9 @@ class App:
         self._build_inputs(c)
         tk.Frame(c, bg=T["border"], height=1).pack(fill="x", pady=(8, 8))
         self._build_model_row(c)
+        self._build_proxy_row(c)
+        self._build_hf_token_row(c)
+        self._build_diarization_row(c)
         self._build_output_row(c)
         self._build_buttons(c)
         self._build_progress(c)
@@ -141,7 +155,59 @@ class App:
         )
         model_cb.pack(side="left")
 
-        tk.Label(row, text="  ※ large-v3 が最高精度（処理時間が長い）",
+        tk.Label(row, text="  ※ large-v3-turbo が速度・精度のバランス最良",
+                 font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(8, 0))
+
+    def _build_proxy_row(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent, bg=T["bg"])
+        row.pack(fill="x", pady=(0, 6))
+
+        tk.Label(row, text="プロキシ URL:", font=self._FS, bg=T["bg"], fg=T["fg2"],
+                 width=12, anchor="e").pack(side="left", padx=(0, 6))
+        self.proxy_var = tk.StringVar(value=self.settings.get("proxy_url", ""))
+        tk.Entry(
+            row, textvariable=self.proxy_var, font=self._FS,
+            bg=T["input"], fg=T["fg"], insertbackground=T["fg"], relief="flat",
+            highlightthickness=1, highlightbackground=T["border"],
+            highlightcolor=T["accent"],
+        ).pack(side="left", fill="x", expand=True, ipady=4)
+        tk.Label(row, text="  省略可 例: http://proxy.example.com:8080",
+                 font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(6, 0))
+
+    def _build_hf_token_row(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent, bg=T["bg"])
+        row.pack(fill="x", pady=(0, 6))
+
+        tk.Label(row, text="HFトークン:", font=self._FS, bg=T["bg"], fg=T["fg2"],
+                 width=12, anchor="e").pack(side="left", padx=(0, 6))
+        self.hf_token_var = tk.StringVar(value=self.settings.get("hf_token", ""))
+        tk.Entry(
+            row, textvariable=self.hf_token_var, font=self._FS, show="*",
+            bg=T["input"], fg=T["fg"], insertbackground=T["fg"], relief="flat",
+            highlightthickness=1, highlightbackground=T["border"],
+            highlightcolor=T["accent"],
+        ).pack(side="left", fill="x", expand=True, ipady=4)
+        tk.Label(row, text="  話者分離に必要（huggingface.co/settings/tokens）",
+                 font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(6, 0))
+
+    def _build_diarization_row(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent, bg=T["bg"])
+        row.pack(fill="x", pady=(0, 6))
+
+        tk.Label(row, text="話者分離:", font=self._FS, bg=T["bg"], fg=T["fg2"],
+                 width=12, anchor="e").pack(side="left", padx=(0, 6))
+
+        self.diarization_var = tk.StringVar(
+            value=self.settings.get("diarization_mode", "自動")
+        )
+        dia_cb = ttk.Combobox(
+            row, textvariable=self.diarization_var,
+            values=DIARIZATION_MODES, state="readonly", width=18,
+            font=self._FS,
+        )
+        dia_cb.pack(side="left")
+
+        tk.Label(row, text="  ※「自動」= 単一話者検出時のみ音声話者分離を実行",
                  font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(8, 0))
 
     def _build_output_row(self, parent: tk.Frame) -> None:
@@ -333,7 +399,12 @@ class App:
 
         threading.Thread(
             target=self._run,
-            args=(mp4, transcript, out_path, self.model_var.get()),
+            args=(
+                mp4, transcript, out_path, self.model_var.get(),
+                self.proxy_var.get().strip(),
+                self.hf_token_var.get().strip(),
+                self.diarization_var.get(),
+            ),
             daemon=True,
         ).start()
 
@@ -348,7 +419,10 @@ class App:
 
     # ── メインパイプライン ──
 
-    def _run(self, mp4: str, transcript: str, out_path: str, model: str) -> None:
+    def _run(
+        self, mp4: str, transcript: str, out_path: str, model: str,
+        proxy: str = "", hf_token: str = "", diarization_mode: str = "自動",
+    ) -> None:
         wav_path: str | None = None
         ok = False
 
@@ -361,6 +435,24 @@ class App:
             if not teams_segs:
                 self._log("⚠ 有効なセグメントが見つかりませんでした", "warn")
             self._check_cancel()
+
+            # 話者分離を使うかどうか判定
+            use_diarization = False
+            if diarization_mode == "常に音声話者分離":
+                use_diarization = True
+                self._log("話者分離モード: 常に音声話者分離", "acc")
+            elif diarization_mode == "自動":
+                if is_single_speaker(teams_segs):
+                    use_diarization = True
+                    self._log("単一話者を検出 → 音声話者分離を使用します", "acc")
+                else:
+                    self._log("複数話者を検出 → Teamsの話者情報を使用します", "dim")
+            else:
+                self._log("話者分離モード: 使用しない", "dim")
+
+            if use_diarization and not hf_token:
+                self._log("⚠ HFトークンが未設定のため話者分離をスキップします", "warn")
+                use_diarization = False
 
             # Step 2: 音声抽出
             self._step("音声抽出", 10.0)
@@ -375,34 +467,52 @@ class App:
             self._step("Whisper 実行中", 20.0)
             self._log(f"Whisperで文字起こし中... （モデル: {model} / 言語: 日本語）", "acc")
 
+            if proxy:
+                self._log(f"  プロキシ使用: {proxy}", "dim")
             whisper_segs = transcribe(
                 wav_path,
                 model,
                 progress_callback=self._whisper_progress,
                 download_callback=self._log,
+                proxy_url=proxy or None,
                 cancel_flag=self._cancel_flag,
             )
             self._log(f"✓ Whisper完了: {len(whisper_segs)} セグメント", "ok")
             self._step("Whisper 完了", 70.0)
             self._check_cancel()
 
-            # Step 4: オフセット自動検出
-            self._step("オフセット検出", 75.0)
-            self._log("タイムスタンプのオフセットを自動検出中...", "acc")
-            offset = detect_offset(whisper_segs, teams_segs)
-            sign = "+" if offset >= 0 else ""
-            self._log(f"  自動検出オフセット: {sign}{offset:.1f}秒", "ok")
-            self._log(
-                f"  （Teamsの会議開始が録音開始より {abs(offset):.1f}秒 "
-                + ("先行" if offset > 0 else "後続") + "）",
-                "dim",
-            )
-            self._check_cancel()
+            if use_diarization:
+                # Step 4: pyannote話者分離
+                self._step("話者分離", 75.0)
+                self._log("pyannote で話者分離を実行中...", "acc")
+                diarized_segs = diarize(
+                    wav_path, hf_token, progress_callback=self._log,
+                )
+                self._check_cancel()
 
-            # Step 5: 話者同期
-            self._step("話者割り当て", 80.0)
-            self._log("Whisperセグメントに話者情報を付与中...", "acc")
-            synced = synchronize(whisper_segs, teams_segs, offset)
+                # Step 5: Whisper + Diarization → 話者割り当て
+                self._step("話者割り当て", 82.0)
+                self._log("Whisperセグメントに話者分離結果を割り当て中...", "acc")
+                synced = assign_speakers_from_diarization(whisper_segs, diarized_segs)
+            else:
+                # Step 4: オフセット自動検出（従来フロー）
+                self._step("オフセット検出", 75.0)
+                self._log("タイムスタンプのオフセットを自動検出中...", "acc")
+                offset = detect_offset(whisper_segs, teams_segs)
+                sign = "+" if offset >= 0 else ""
+                self._log(f"  自動検出オフセット: {sign}{offset:.1f}秒", "ok")
+                self._log(
+                    f"  （Teamsの会議開始が録音開始より {abs(offset):.1f}秒 "
+                    + ("先行" if offset > 0 else "後続") + "）",
+                    "dim",
+                )
+                self._check_cancel()
+
+                # Step 5: 話者同期（従来フロー）
+                self._step("話者割り当て", 80.0)
+                self._log("Whisperセグメントに話者情報を付与中...", "acc")
+                synced = synchronize(whisper_segs, teams_segs, offset)
+
             unknown_count = sum(1 for s in synced if s.speaker == "不明")
             if unknown_count:
                 self._log(f"  ⚠ {unknown_count} セグメントに話者を割当できませんでした", "warn")

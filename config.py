@@ -25,3 +25,7 @@ DETECT_OFFSET_MIN_RATIO = 0.3   # 採用する最低テキスト類似度
 # 出力
 OUTPUT_ENCODING = "utf-8-sig"  # BOM付きUTF-8（Windowsメモ帳・Word対応）
 UNKNOWN_SPEAKER = "不明"
+
+# 話者分離（pyannote）
+DIARIZATION_MODEL          = "pyannote/speaker-diarization-3.1"
+DIARIZATION_SPEAKER_PREFIX = "話者"  # SPEAKER_00 → 話者1 に変換

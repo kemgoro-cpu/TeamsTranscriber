@@ -229,6 +229,12 @@ def parse_docx(docx_path: str) -> list[TeamsSegment]:
 
 # ── 公開インターフェース ──────────────────────────────────────────────────────
 
+def is_single_speaker(segments: list[TeamsSegment]) -> bool:
+    """トランスクリプト内のユニーク話者が1人以下なら True を返す。"""
+    speakers = set(seg.speaker for seg in segments if seg.speaker)
+    return len(speakers) <= 1
+
+
 def parse_transcript(path: str) -> list[TeamsSegment]:
     """拡張子から形式を自動判定し、解析結果を返す。"""
     ext = os.path.splitext(path)[1].lower()

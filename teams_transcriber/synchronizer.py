@@ -11,8 +11,10 @@ from statistics import median
 from config import (
     DETECT_OFFSET_SAMPLE_N,
     DETECT_OFFSET_MIN_RATIO,
+    DIARIZATION_SPEAKER_PREFIX,
     UNKNOWN_SPEAKER,
 )
+from teams_transcriber.diarizer import DiarizedSegment
 from teams_transcriber.transcript_parser import TeamsSegment
 from teams_transcriber.whisper_runner import WhisperSegment
 
@@ -138,6 +140,65 @@ def synchronize(
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_speaker = t_speaker
+            k += 1
+
+        results.append(SyncedSegment(
+            speaker=best_speaker,
+            start=w.start,
+            end=w.end,
+            text=w.text,
+        ))
+
+    return results
+
+
+def assign_speakers_from_diarization(
+    whisper_segs: list[WhisperSegment],
+    diarized_segs: list[DiarizedSegment],
+) -> list[SyncedSegment]:
+    """
+    各Whisperセグメントに、時間重複が最大のDiarizedSegmentの話者を割り当てる。
+
+    話者ラベル（SPEAKER_00 等）を「話者1」「話者2」…に変換する。
+    """
+    # 話者ラベル → 日本語ラベルのマッピングを構築
+    raw_speakers = sorted(set(seg.speaker for seg in diarized_segs))
+    speaker_map: dict[str, str] = {
+        raw: f"{DIARIZATION_SPEAKER_PREFIX}{i + 1}"
+        for i, raw in enumerate(raw_speakers)
+    }
+
+    if not diarized_segs:
+        return [
+            SyncedSegment(speaker=UNKNOWN_SPEAKER, start=w.start, end=w.end, text=w.text)
+            for w in whisper_segs
+        ]
+
+    results: list[SyncedSegment] = []
+    j = 0
+
+    for w in whisper_segs:
+        w_dur = w.end - w.start
+        if w_dur <= 0:
+            results.append(SyncedSegment(
+                speaker=UNKNOWN_SPEAKER, start=w.start, end=w.end, text=w.text
+            ))
+            continue
+
+        while j < len(diarized_segs) - 1 and diarized_segs[j].end <= w.start:
+            j += 1
+
+        best_overlap = 0.0
+        best_speaker = UNKNOWN_SPEAKER
+        k = j
+        while k < len(diarized_segs):
+            d = diarized_segs[k]
+            if d.start >= w.end:
+                break
+            overlap = min(w.end, d.end) - max(w.start, d.start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = speaker_map.get(d.speaker, d.speaker)
             k += 1
 
         results.append(SyncedSegment(

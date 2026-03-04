@@ -60,6 +60,7 @@ def _is_model_cached(model_name: str) -> bool:
 def _ensure_model_downloaded(
     model_name: str,
     log: Callable[[str], None] | None = None,
+    proxy_url: str | None = None,
 ) -> None:
     """
     モデルが未ダウンロードの場合、進捗を表示しながらダウンロードする。
@@ -67,6 +68,10 @@ def _ensure_model_downloaded(
 
     キャッシュディレクトリのサイズを3秒ごとに監視し、
     取得済みMBとパーセントをログに流す。
+
+    Args:
+        proxy_url: プロキシURL（例: "http://proxy.example.com:8080"）。
+                   省略時は環境変数 HTTPS_PROXY / HTTP_PROXY を使用。
     """
     if _is_model_cached(model_name):
         if log:
@@ -82,6 +87,13 @@ def _ensure_model_downloaded(
     repo_id = f"Systran/faster-whisper-{model_name}"
     repo_dir = _hf_hub_cache() / f"models--{repo_id.replace('/', '--')}"
     approx_bytes = approx_mb * 1024 * 1024
+
+    # プロキシ設定（環境変数経由が huggingface_hub / requests に最も確実に効く）
+    _orig_env: dict[str, str] = {}
+    if proxy_url:
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            _orig_env[key] = os.environ.get(key, "")
+            os.environ[key] = proxy_url
 
     stop_event = threading.Event()
 
@@ -122,6 +134,13 @@ def _ensure_model_downloaded(
     finally:
         stop_event.set()
         monitor.join(timeout=5)
+        # 環境変数を元に戻す
+        if proxy_url:
+            for key, val in _orig_env.items():
+                if val:
+                    os.environ[key] = val
+                else:
+                    os.environ.pop(key, None)
 
 
 def transcribe(
@@ -130,6 +149,7 @@ def transcribe(
     language: str = WHISPER_LANGUAGE,
     progress_callback: Callable[[int, str], None] | None = None,
     download_callback: Callable[[str], None] | None = None,
+    proxy_url: str | None = None,
     cancel_flag: threading.Event | None = None,
 ) -> list[WhisperSegment]:
     """
@@ -141,6 +161,7 @@ def transcribe(
         language: 言語コード（デフォルト "ja"）
         progress_callback: (セグメント番号, テキストプレビュー) を受け取るコールバック
         download_callback: ダウンロード進捗メッセージ（文字列）を受け取るコールバック
+        proxy_url: プロキシURL（初回ダウンロード時のみ使用）
         cancel_flag: セットされたらキャンセルする threading.Event
 
     Raises:
@@ -155,7 +176,7 @@ def transcribe(
         ) from e
 
     # 初回のみダウンロード（キャッシュ済みなら即座に返る）
-    _ensure_model_downloaded(model_name, log=download_callback)
+    _ensure_model_downloaded(model_name, log=download_callback, proxy_url=proxy_url)
 
     if cancel_flag and cancel_flag.is_set():
         raise InterruptedError()

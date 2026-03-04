@@ -24,6 +24,8 @@ def ensure_packages() -> None:
     required = {
         "faster_whisper": "faster-whisper",
         "docx":           "python-docx",
+        "pyannote":       "pyannote.audio",
+        "torch":          "torch",
     }
     for module, pip_name in required.items():
         try:
@@ -62,7 +64,7 @@ def main() -> None:
         root.destroy()
         return
 
-    ww, wh = 780, 640
+    ww, wh = 780, 720
     x = (root.winfo_screenwidth()  - ww) // 2
     y = (root.winfo_screenheight() - wh) // 2
     root.geometry(f"{ww}x{wh}+{x}+{y}")

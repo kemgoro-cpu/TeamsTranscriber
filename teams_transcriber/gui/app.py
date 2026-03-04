@@ -374,12 +374,12 @@ class App:
             # Step 3: Whisper文字起こし
             self._step("Whisper 実行中", 20.0)
             self._log(f"Whisperで文字起こし中... （モデル: {model} / 言語: 日本語）", "acc")
-            self._log("  ※ 初回実行時はモデルのダウンロードに数分かかります", "dim")
 
             whisper_segs = transcribe(
                 wav_path,
                 model,
                 progress_callback=self._whisper_progress,
+                download_callback=self._log,
                 cancel_flag=self._cancel_flag,
             )
             self._log(f"✓ Whisper完了: {len(whisper_segs)} セグメント", "ok")

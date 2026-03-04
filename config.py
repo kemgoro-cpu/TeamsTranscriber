@@ -11,7 +11,7 @@ FFMPEG_CMD     = "ffmpeg"
 FFMPEG_TIMEOUT = 7200  # 秒（2時間録画を想定）
 
 # Whisper
-WHISPER_MODELS   = ["tiny", "base", "small", "medium", "large-v3"]
+WHISPER_MODELS   = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 DEFAULT_MODEL    = "small"
 WHISPER_LANGUAGE = "ja"
 WHISPER_BEAM_SIZE   = 5

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import threading
+import traceback
 from typing import Any
 
 import tkinter as tk
@@ -540,15 +541,14 @@ class App:
         except InterruptedError:
             self._step("中止", 0.0)
             self._log("中止されました", "warn")
-        except FileNotFoundError as e:
-            self._step("エラー", 0.0)
-            self._log(f"✗ {e}", "err")
-        except ValueError as e:
+        except (FileNotFoundError, ValueError) as e:
             self._step("エラー", 0.0)
             self._log(f"✗ {e}", "err")
         except Exception as e:
             self._step("エラー", 0.0)
             self._log(f"✗ 予期しないエラー: {e}", "err")
+            for line in traceback.format_exc().splitlines():
+                self._log(f"  {line}", "dim")
         finally:
             if wav_path and os.path.exists(wav_path):
                 try:

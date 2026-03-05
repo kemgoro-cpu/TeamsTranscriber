@@ -25,6 +25,17 @@ _APPROX_SIZE_MB: dict[str, int] = {
     "large-v3-turbo": 1600,
 }
 
+# モデルごとのHuggingFaceリポジトリID
+# large-v3-turbo は Systran ではなく h2oai のリポジトリを使用する。
+_REPO_ID_MAP: dict[str, str] = {
+    "tiny":             "Systran/faster-whisper-tiny",
+    "base":             "Systran/faster-whisper-base",
+    "small":            "Systran/faster-whisper-small",
+    "medium":           "Systran/faster-whisper-medium",
+    "large-v3":         "Systran/faster-whisper-large-v3",
+    "large-v3-turbo":   "h2oai/faster-whisper-large-v3-turbo",
+}
+
 
 @dataclass
 class WhisperSegment:
@@ -46,7 +57,7 @@ def _hf_hub_cache() -> Path:
 
 def _is_model_cached(model_name: str) -> bool:
     """モデルがローカルキャッシュ済みかどうかを確認する。"""
-    repo_id = f"Systran/faster-whisper-{model_name}"
+    repo_id = _REPO_ID_MAP.get(model_name, f"Systran/faster-whisper-{model_name}")
     repo_dir = _hf_hub_cache() / f"models--{repo_id.replace('/', '--')}"
     snapshots = repo_dir / "snapshots"
     if not snapshots.exists():
@@ -84,7 +95,7 @@ def _ensure_model_downloaded(
         log(f"  モデル「{model_name}」を初回ダウンロード中... {size_hint}")
         log("  ※ ネットワーク速度によっては数分〜十数分かかります")
 
-    repo_id = f"Systran/faster-whisper-{model_name}"
+    repo_id = _REPO_ID_MAP.get(model_name, f"Systran/faster-whisper-{model_name}")
     repo_dir = _hf_hub_cache() / f"models--{repo_id.replace('/', '--')}"
     approx_bytes = approx_mb * 1024 * 1024
 
@@ -181,7 +192,20 @@ def transcribe(
     if cancel_flag and cancel_flag.is_set():
         raise InterruptedError()
 
-    model = WhisperModel(model_name, device="auto", compute_type="int8")
+    # GPU (CUDA) を優先して実行し、失敗した場合は CPU にフォールバックする。
+    try:
+        if download_callback:
+            download_callback("  GPU (CUDA) を優先して実行します")
+        # GPU では float16 の方が一般的に高速
+        model = WhisperModel(model_name, device="cuda", compute_type="float16")
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "cuda" in msg or "cublas" in msg:
+            if download_callback:
+                download_callback("  CUDA 実行に失敗したため CPU 実行に切り替えます")
+            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        else:
+            raise
 
     segments_iter, _info = model.transcribe(
         wav_path,

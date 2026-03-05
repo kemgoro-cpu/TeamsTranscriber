@@ -20,12 +20,15 @@ import sys
 
 
 def ensure_packages() -> None:
-    """必要なパッケージが未インストールの場合は自動インストールする。"""
+    """必要な基本パッケージが未インストールの場合は自動インストールする。
+
+    torch / pyannote.audio は巨大なため自動インストールしない。
+    話者分離機能を使う場合は手動でインストールすること:
+        pip install torch pyannote.audio
+    """
     required = {
         "faster_whisper": "faster-whisper",
         "docx":           "python-docx",
-        "pyannote":       "pyannote.audio",
-        "torch":          "torch",
     }
     for module, pip_name in required.items():
         try:

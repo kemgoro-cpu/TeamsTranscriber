@@ -155,18 +155,20 @@ def synchronize(
 def assign_speakers_from_diarization(
     whisper_segs: list[WhisperSegment],
     diarized_segs: list[DiarizedSegment],
+    speaker_map: dict[str, str] | None = None,
 ) -> list[SyncedSegment]:
     """
     各Whisperセグメントに、時間重複が最大のDiarizedSegmentの話者を割り当てる。
 
-    話者ラベル（SPEAKER_00 等）を「話者1」「話者2」…に変換する。
+    speaker_map が None のときは話者ラベル（SPEAKER_00 等）を「話者1」「話者2」…に変換する。
+    speaker_map を渡すと、SPEAKER_XX → 表示名 の変換にそれを使う（話者登録の照合結果など）。
     """
-    # 話者ラベル → 日本語ラベルのマッピングを構築
-    raw_speakers = sorted(set(seg.speaker for seg in diarized_segs))
-    speaker_map: dict[str, str] = {
-        raw: f"{DIARIZATION_SPEAKER_PREFIX}{i + 1}"
-        for i, raw in enumerate(raw_speakers)
-    }
+    if speaker_map is None:
+        raw_speakers = sorted(set(seg.speaker for seg in diarized_segs))
+        speaker_map = {
+            raw: f"{DIARIZATION_SPEAKER_PREFIX}{i + 1}"
+            for i, raw in enumerate(raw_speakers)
+        }
 
     if not diarized_segs:
         return [

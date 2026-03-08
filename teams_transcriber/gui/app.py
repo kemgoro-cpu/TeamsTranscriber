@@ -11,12 +11,27 @@ from typing import Any
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from config import APP_NAME, APP_VERSION, WHISPER_MODELS, DEFAULT_MODEL
+from config import (
+    APP_NAME,
+    APP_VERSION,
+    DIARIZATION_BACKEND,
+    SPEAKER_ENROLLMENT_SIMILARITY_THRESHOLD,
+    WHISPER_MODELS,
+    DEFAULT_MODEL,
+)
 from teams_transcriber.audio import extract_audio
 from teams_transcriber.diarizer import diarize
 from teams_transcriber.merger import merge_consecutive
 from teams_transcriber.output_writer import write_output
 from teams_transcriber.settings import AppSettings
+from teams_transcriber.speaker_enrollment import (
+    add_enrollment,
+    compute_embeddings_for_diarized_speakers,
+    delete_enrollment,
+    list_enrollments,
+    load_enrollment_embeddings,
+    match_speakers_to_enrollment,
+)
 from teams_transcriber.synchronizer import (
     assign_speakers_from_diarization,
     detect_offset,
@@ -28,6 +43,14 @@ from teams_transcriber.gui.theme import THEME as T
 
 # 話者分離モード
 DIARIZATION_MODES = ["自動", "常に音声話者分離", "使用しない"]
+
+# 話者分離エンジン（表示名 → バックエンド識別子）
+DIARIZATION_BACKEND_CHOICES = ["ローカル（diarize）", "pyannote（HFトークン要）"]
+DIARIZATION_BACKEND_MAP = {
+    "ローカル（diarize）": "diarize",
+    "pyannote（HFトークン要）": "pyannote",
+}
+DIARIZATION_BACKEND_TO_LABEL = {v: k for k, v in DIARIZATION_BACKEND_MAP.items()}
 
 
 class App:
@@ -45,6 +68,7 @@ class App:
 
         self.running: bool = False
         self._cancel_flag = threading.Event()
+        self._heartbeat_after_id: str | None = None  # 話者分離中の「まだ処理中」表示用
 
         self.settings = AppSettings()
         self._tmp_wav: str | None = None
@@ -65,6 +89,12 @@ class App:
         self.settings.set("proxy_url", self.proxy_var.get().strip())
         self.settings.set("hf_token", self.hf_token_var.get().strip())
         self.settings.set("diarization_mode", self.diarization_var.get())
+        backend_label = self.diarization_backend_var.get()
+        self.settings.set(
+            "diarization_backend",
+            DIARIZATION_BACKEND_MAP.get(backend_label, "diarize"),
+        )
+        self.settings.set("use_speaker_enrollment", self.use_speaker_enrollment_var.get())
         self.settings.save()
 
     # ── UI構築 ──
@@ -74,17 +104,25 @@ class App:
         c = tk.Frame(root, bg=T["bg"])
         c.pack(fill="both", expand=True, padx=24, pady=16)
 
-        self._build_header(c)
-        tk.Frame(c, bg=T["border"], height=1).pack(fill="x", pady=(10, 10))
-        self._build_inputs(c)
-        tk.Frame(c, bg=T["border"], height=1).pack(fill="x", pady=(8, 8))
-        self._build_model_row(c)
-        self._build_proxy_row(c)
-        self._build_hf_token_row(c)
-        self._build_diarization_row(c)
-        self._build_output_row(c)
-        self._build_buttons(c)
-        self._build_progress(c)
+        # 上段: フォーム（拡張しないのでログが隠れない）
+        upper = tk.Frame(c, bg=T["bg"])
+        upper.pack(fill="x")
+
+        self._build_header(upper)
+        tk.Frame(upper, bg=T["border"], height=1).pack(fill="x", pady=(10, 10))
+        self._build_inputs(upper)
+        tk.Frame(upper, bg=T["border"], height=1).pack(fill="x", pady=(8, 8))
+        self._build_model_row(upper)
+        self._build_proxy_row(upper)
+        self._build_hf_token_row(upper)
+        self._build_diarization_backend_row(upper)
+        self._build_diarization_row(upper)
+        self._build_speaker_enrollment_section(upper)
+        self._build_output_row(upper)
+        self._build_buttons(upper)
+        self._build_progress(upper)
+
+        # ログ欄: 残りスペースを占有（最低高さを確保）
         self._build_log_panel(c)
 
     def _build_header(self, parent: tk.Frame) -> None:
@@ -188,8 +226,42 @@ class App:
             highlightthickness=1, highlightbackground=T["border"],
             highlightcolor=T["accent"],
         ).pack(side="left", fill="x", expand=True, ipady=4)
-        tk.Label(row, text="  話者分離に必要（huggingface.co/settings/tokens）",
-                 font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(6, 0))
+        tk.Label(
+            row,
+            text="  ※「pyannote」を選んだ時のみ必要",
+            font=self._FS, bg=T["bg"], fg=T["dim"],
+        ).pack(side="left", padx=(6, 0))
+
+    def _build_diarization_backend_row(self, parent: tk.Frame) -> None:
+        row = tk.Frame(parent, bg=T["bg"])
+        row.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            row, text="話者分離エンジン:",
+            font=self._FS, bg=T["bg"], fg=T["fg2"],
+            width=12, anchor="e",
+        ).pack(side="left", padx=(0, 6))
+
+        saved = self.settings.get("diarization_backend", DIARIZATION_BACKEND)
+        self.diarization_backend_var = tk.StringVar(
+            value=DIARIZATION_BACKEND_TO_LABEL.get(saved, DIARIZATION_BACKEND_CHOICES[0])
+        )
+        backend_cb = ttk.Combobox(
+            row,
+            textvariable=self.diarization_backend_var,
+            values=DIARIZATION_BACKEND_CHOICES,
+            state="readonly",
+            width=22,
+            font=self._FS,
+        )
+        backend_cb.pack(side="left")
+        tk.Label(
+            row,
+            text="  ※短時間で完了させるなら「ローカル」推奨（HF不要）",
+            font=self._FS, bg=T["bg"], fg=T["dim"],
+        ).pack(side="left", padx=(8, 0))
+        # 話者登録の有効/無効はバックエンド変更で更新する
+        backend_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_speaker_enrollment_state())
 
     def _build_diarization_row(self, parent: tk.Frame) -> None:
         row = tk.Frame(parent, bg=T["bg"])
@@ -210,6 +282,174 @@ class App:
 
         tk.Label(row, text="  ※「自動」= 単一話者検出時のみ音声話者分離を実行",
                  font=self._FS, bg=T["bg"], fg=T["dim"]).pack(side="left", padx=(8, 0))
+
+    # 話者登録の入力欄は背景をやや明るくして黒く見えないようにする
+    _ENROLLMENT_INPUT_BG = "#3c3c4c"
+
+    def _build_speaker_enrollment_section(self, parent: tk.Frame) -> None:
+        """話者登録ブロック: 一覧・追加フォーム・削除・「話者登録を使って名前を付ける」チェック"""
+        from tkinter import messagebox as mb
+
+        lf = tk.LabelFrame(
+            parent, text="話者登録（pyannote / diarize とも登録名で表示可能。diarize 時は HFトークン 要）",
+            font=self._FS, bg=T["bg"], fg=T["fg2"],
+        )
+        lf.pack(fill="x", pady=(0, 8))
+
+        # 一覧（表示名, 音声, 区間, 品質）
+        list_f = tk.Frame(lf, bg=T["bg"])
+        list_f.pack(fill="x", pady=(4, 4))
+        self.enrollment_listbox = tk.Listbox(
+            list_f, height=3, font=self._FS,
+            bg=self._ENROLLMENT_INPUT_BG, fg=T["fg"], selectbackground=T["accent"],
+            highlightthickness=0,
+        )
+        self.enrollment_listbox.pack(side="left", fill="x", expand=True)
+        sb = ttk.Scrollbar(list_f, command=self.enrollment_listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.enrollment_listbox.configure(yscrollcommand=sb.set)
+
+        # 追加フォーム（2行に分けてボタンが隠れないようにする）
+        form_f = tk.Frame(lf, bg=T["bg"])
+        form_f.pack(fill="x", pady=(2, 4))
+
+        # 1行目: 表示名 + 音声ファイル
+        row1 = tk.Frame(form_f, bg=T["bg"])
+        row1.pack(fill="x", pady=(0, 4))
+        tk.Label(row1, text="表示名:", font=self._FS, bg=T["bg"], fg=T["fg2"], width=6, anchor="e").pack(side="left", padx=(0, 4))
+        self.enrollment_name_var = tk.StringVar()
+        tk.Entry(row1, textvariable=self.enrollment_name_var, font=self._FS, width=14,
+                 bg=self._ENROLLMENT_INPUT_BG, fg=T["fg"], insertbackground=T["fg"], highlightthickness=0).pack(side="left", padx=(0, 12))
+        tk.Label(row1, text="音声:", font=self._FS, bg=T["bg"], fg=T["fg2"], width=4, anchor="e").pack(side="left", padx=(0, 4))
+        self.enrollment_audio_var = tk.StringVar()
+        tk.Entry(row1, textvariable=self.enrollment_audio_var, font=self._FS,
+                 bg=self._ENROLLMENT_INPUT_BG, fg=T["fg"], insertbackground=T["fg"], highlightthickness=0).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        btn_browse_audio = tk.Label(row1, text="参照", font=self._FS, bg=T["card"], fg=T["fg2"], padx=8, pady=2, cursor="hand2")
+        btn_browse_audio.pack(side="left")
+
+        def _browse_enrollment_audio() -> None:
+            path = filedialog.askopenfilename(
+                title="参照音声・動画を選択（WAV/MP3/MP4等）",
+                filetypes=[
+                    ("音声・動画", "*.wav *.mp3 *.wave *.mp4 *.mkv *.webm"),
+                    ("音声", "*.wav *.mp3 *.wave"),
+                    ("動画", "*.mp4 *.mkv *.webm"),
+                    ("すべてのファイル", "*.*"),
+                ],
+            )
+            if path:
+                self.enrollment_audio_var.set(path)
+
+        btn_browse_audio.bind("<Button-1>", lambda e: _browse_enrollment_audio())
+
+        # 2行目: 開始秒・終了秒 + 登録・削除ボタン
+        row2 = tk.Frame(form_f, bg=T["bg"])
+        row2.pack(fill="x")
+        tk.Label(row2, text="開始秒:", font=self._FS, bg=T["bg"], fg=T["fg2"], width=6, anchor="e").pack(side="left", padx=(0, 4))
+        self.enrollment_start_var = tk.StringVar()
+        tk.Entry(row2, textvariable=self.enrollment_start_var, font=self._FS, width=6,
+                 bg=self._ENROLLMENT_INPUT_BG, fg=T["fg"], insertbackground=T["fg"], highlightthickness=0).pack(side="left", padx=(0, 8))
+        tk.Label(row2, text="終了秒:", font=self._FS, bg=T["bg"], fg=T["fg2"], width=6, anchor="e").pack(side="left", padx=(0, 4))
+        self.enrollment_end_var = tk.StringVar()
+        tk.Entry(row2, textvariable=self.enrollment_end_var, font=self._FS, width=6,
+                 bg=self._ENROLLMENT_INPUT_BG, fg=T["fg"], insertbackground=T["fg"], highlightthickness=0).pack(side="left", padx=(0, 16))
+
+        def _do_add_enrollment() -> None:
+            name = self.enrollment_name_var.get().strip()
+            audio_path = self.enrollment_audio_var.get().strip()
+            if not name:
+                mb.showerror("入力エラー", "表示名を入力してください。")
+                return
+            if not audio_path or not os.path.isfile(audio_path):
+                mb.showerror("入力エラー", "音声ファイルを選択し、存在するパスを指定してください。")
+                return
+            start_s = self.enrollment_start_var.get().strip()
+            end_s = self.enrollment_end_var.get().strip()
+            start_sec: float | None = float(start_s) if start_s else None
+            end_sec: float | None = float(end_s) if end_s else None
+            if start_s and end_s and start_sec is not None and end_sec is not None and start_sec >= end_sec:
+                mb.showerror("入力エラー", "開始秒は終了秒より小さくしてください。")
+                return
+            hf_token = self.hf_token_var.get().strip()
+            if not hf_token:
+                mb.showerror("話者登録", "pyannote 用の HFトークン を入力してください。")
+                return
+            try:
+                uid, warnings = add_enrollment(name, audio_path, hf_token, start_sec, end_sec)
+                self._refresh_enrollment_list()
+                self._refresh_speaker_enrollment_state()
+                self.enrollment_name_var.set("")
+                self.enrollment_audio_var.set("")
+                self.enrollment_start_var.set("")
+                self.enrollment_end_var.set("")
+                self.log(f"話者登録を追加しました: {name} (ID: {uid})", "ok")
+                for w in warnings:
+                    self.log(f"  ⚠ {w}", "warn")
+            except Exception as ex:
+                self.log(f"話者登録の追加に失敗しました: {ex}", "err")
+                mb.showerror("話者登録", str(ex))
+
+        btn_add = tk.Label(row2, text="登録", font=self._FS, bg=T["accent"], fg="white", padx=12, pady=4, cursor="hand2")
+        btn_add.pack(side="left", padx=(0, 6))
+        btn_add.bind("<Button-1>", lambda e: _do_add_enrollment())
+
+        def _do_delete_enrollment() -> None:
+            sel = self.enrollment_listbox.curselection()
+            if not sel:
+                mb.showinfo("話者登録", "削除する話者を一覧で選択してください。")
+                return
+            idx = int(sel[0])
+            enrollments = list_enrollments()
+            if idx >= len(enrollments):
+                return
+            sp = enrollments[idx]
+            if mb.askyesno("話者登録", f"「{sp.name}」を削除しますか？"):
+                delete_enrollment(sp.id)
+                self._refresh_enrollment_list()
+                self._refresh_speaker_enrollment_state()
+                self.log(f"話者登録を削除しました: {sp.name}", "dim")
+
+        btn_del = tk.Label(row2, text="削除", font=self._FS, bg=T["card"], fg=T["fg2"], padx=12, pady=4, cursor="hand2")
+        btn_del.pack(side="left")
+        btn_del.bind("<Button-1>", lambda e: _do_delete_enrollment())
+
+        self._refresh_enrollment_list = self._build_refresh_enrollment_list()
+        self._refresh_speaker_enrollment_state = self._build_refresh_speaker_enrollment_state()
+
+        # 「話者登録を使って名前を付ける」チェック（pyannote かつ 登録≥1 のときのみ有効）
+        row_cb = tk.Frame(lf, bg=T["bg"])
+        row_cb.pack(fill="x", pady=(4, 4))
+        self.use_speaker_enrollment_var = tk.BooleanVar(value=self.settings.get("use_speaker_enrollment", False))
+        self.use_speaker_enrollment_cb = tk.Checkbutton(
+            row_cb, text="話者登録を使って名前を付ける（分離結果の SPEAKER_00 等を登録名に変換）",
+            variable=self.use_speaker_enrollment_var, font=self._FS, bg=T["bg"], fg=T["fg2"],
+            activebackground=T["bg"], activeforeground=T["fg2"], selectcolor=T["input"],
+        )
+        self.use_speaker_enrollment_cb.pack(side="left")
+        self._refresh_speaker_enrollment_state()
+        # 起動直後に登録一覧を表示
+        self._refresh_enrollment_list()
+
+    def _build_refresh_enrollment_list(self) -> Any:
+        def refresh() -> None:
+            self.enrollment_listbox.delete(0, "end")
+            for e in list_enrollments():
+                rng = ""
+                if e.start_sec is not None or e.end_sec is not None:
+                    rng = f" [{e.start_sec or 0}-{e.end_sec or '?'}s]"
+                status = {"ok": "", "multiple_speakers": "⚠複数話者?", "low_speech_ratio": "⚠発話少"}.get(e.quality_status, "")
+                line = f"{e.name} | {os.path.basename(e.audio_path)}{rng} {status}".strip()
+                self.enrollment_listbox.insert("end", line)
+        return refresh
+
+    def _build_refresh_speaker_enrollment_state(self) -> Any:
+        def refresh() -> None:
+            enrollments = list_enrollments()
+            enabled = len(enrollments) >= 1
+            self.use_speaker_enrollment_cb.configure(state="normal" if enabled else "disabled")
+            if not enabled:
+                self.use_speaker_enrollment_var.set(False)
+        return refresh
 
     def _build_output_row(self, parent: tk.Frame) -> None:
         row = tk.Frame(parent, bg=T["bg"])
@@ -328,6 +568,31 @@ class App:
                 self.progress_var.set(progress)
         self._ui(_do)
 
+    def _start_diarization_heartbeat(self) -> None:
+        """話者分離中のログ用タイマーを開始（数秒ごとに「まだ処理中」を表示）"""
+        self._stop_diarization_heartbeat()
+        self._heartbeat_after_id = self.root.after(
+            8000,
+            self._diarization_heartbeat_tick,
+        )
+
+    def _stop_diarization_heartbeat(self) -> None:
+        """話者分離中のログ用タイマーを停止"""
+        if self._heartbeat_after_id is not None:
+            self.root.after_cancel(self._heartbeat_after_id)
+            self._heartbeat_after_id = None
+
+    def _diarization_heartbeat_tick(self) -> None:
+        """定期的にログへ「まだ話者分離を実行中」を出す"""
+        self._heartbeat_after_id = None
+        if not self.running:
+            return
+        self.log("  ... 話者分離を実行中（しばらくお待ちください）", "dim")
+        self._heartbeat_after_id = self.root.after(
+            8000,
+            self._diarization_heartbeat_tick,
+        )
+
     # ── ファイル参照 ──
 
     def _browse_mp4(self) -> None:
@@ -398,6 +663,13 @@ class App:
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
+        diarization_backend = DIARIZATION_BACKEND_MAP.get(
+            self.diarization_backend_var.get(), "diarize"
+        )
+        use_speaker_enrollment = (
+            self.use_speaker_enrollment_var.get()
+            and len(list_enrollments()) >= 1
+        )
         threading.Thread(
             target=self._run,
             args=(
@@ -405,6 +677,8 @@ class App:
                 self.proxy_var.get().strip(),
                 self.hf_token_var.get().strip(),
                 self.diarization_var.get(),
+                diarization_backend,
+                use_speaker_enrollment,
             ),
             daemon=True,
         ).start()
@@ -423,6 +697,8 @@ class App:
     def _run(
         self, mp4: str, transcript: str, out_path: str, model: str,
         proxy: str = "", hf_token: str = "", diarization_mode: str = "自動",
+        diarization_backend: str = "diarize",
+        use_speaker_enrollment: bool = False,
     ) -> None:
         wav_path: str | None = None
         ok = False
@@ -451,8 +727,8 @@ class App:
             else:
                 self._log("話者分離モード: 使用しない", "dim")
 
-            if use_diarization and not hf_token:
-                self._log("⚠ HFトークンが未設定のため話者分離をスキップします", "warn")
+            if use_diarization and diarization_backend == "pyannote" and not hf_token:
+                self._log("⚠ HFトークンが未設定のため話者分離をスキップします（pyannote使用時）", "warn")
                 use_diarization = False
 
             # Step 2: 音声抽出
@@ -483,18 +759,71 @@ class App:
             self._check_cancel()
 
             if use_diarization:
-                # Step 4: pyannote話者分離
+                # Step 4: 話者分離（バックエンドは config で diarize / pyannote）
+                # 進捗は 75%〜82% の範囲で表示（pyannote 時は hook で細かく更新、diarize 時は 75% のまま）
                 self._step("話者分離", 75.0)
-                self._log("pyannote で話者分離を実行中...", "acc")
-                diarized_segs = diarize(
-                    wav_path, hf_token, progress_callback=self._log,
-                )
+                self._ui(self._start_diarization_heartbeat)
+                try:
+                    diarize_result = diarize(
+                        wav_path,
+                        hf_token or "",
+                        progress_callback=self._log,
+                        progress_pct_callback=lambda frac: self._ui(
+                            lambda f=frac: self.progress_var.set(75.0 + 7.0 * f)
+                        ),
+                        backend=diarization_backend,
+                        return_embeddings=use_speaker_enrollment,
+                    )
+                finally:
+                    self._ui(self._stop_diarization_heartbeat)
                 self._check_cancel()
+
+                speaker_map = None
+                if isinstance(diarize_result, tuple):
+                    diarized_segs, diar_embeddings = diarize_result
+                else:
+                    diarized_segs = diarize_result
+
+                if use_speaker_enrollment:
+                    if diarization_backend == "pyannote" and isinstance(diarize_result, tuple):
+                        enrolled = load_enrollment_embeddings()
+                        speaker_map = match_speakers_to_enrollment(
+                            diar_embeddings, enrolled, SPEAKER_ENROLLMENT_SIMILARITY_THRESHOLD
+                        )
+                        if speaker_map:
+                            self._log(f"  話者登録と照合: {len(speaker_map)} 名を割り当てました", "acc")
+                        else:
+                            speaker_map = None
+                    elif diarization_backend == "diarize":
+                        if hf_token:
+                            self._log("  diarize の話者を登録名と照合中（embedding 取得）...", "acc")
+                            diar_embeddings = compute_embeddings_for_diarized_speakers(
+                                wav_path,
+                                diarized_segs,
+                                hf_token,
+                                progress_callback=lambda msg: self._log(msg, "dim"),
+                            )
+                            if diar_embeddings:
+                                enrolled = load_enrollment_embeddings()
+                                speaker_map = match_speakers_to_enrollment(
+                                    diar_embeddings, enrolled, SPEAKER_ENROLLMENT_SIMILARITY_THRESHOLD
+                                )
+                                if speaker_map:
+                                    self._log(f"  話者登録と照合: {len(speaker_map)} 名を割り当てました", "acc")
+                                else:
+                                    speaker_map = None
+                            else:
+                                speaker_map = None
+                        else:
+                            self._log("  ⚠ diarize で話者登録を使うには HFトークン を入力してください", "warn")
+                            speaker_map = None
 
                 # Step 5: Whisper + Diarization → 話者割り当て
                 self._step("話者割り当て", 82.0)
                 self._log("Whisperセグメントに話者分離結果を割り当て中...", "acc")
-                synced = assign_speakers_from_diarization(whisper_segs, diarized_segs)
+                synced = assign_speakers_from_diarization(
+                    whisper_segs, diarized_segs, speaker_map=speaker_map
+                )
             else:
                 # Step 4: オフセット自動検出（従来フロー）
                 self._step("オフセット検出", 75.0)
@@ -546,9 +875,22 @@ class App:
             self._log(f"✗ {e}", "err")
         except Exception as e:
             self._step("エラー", 0.0)
+            tb_str = traceback.format_exc()
             self._log(f"✗ 予期しないエラー: {e}", "err")
-            for line in traceback.format_exc().splitlines():
+            for line in tb_str.splitlines():
                 self._log(f"  {line}", "dim")
+            # エラーが出ずに落ちる場合に備え、トレースバックをファイルにも残す
+            try:
+                crash_log = os.path.join(
+                    os.environ.get("APPDATA", os.path.expanduser("~")),
+                    "TeamsTranscriber",
+                    "last_error.txt",
+                )
+                os.makedirs(os.path.dirname(crash_log), exist_ok=True)
+                with open(crash_log, "w", encoding="utf-8") as f:
+                    f.write(tb_str)
+            except Exception:
+                pass
         finally:
             if wav_path and os.path.exists(wav_path):
                 try:

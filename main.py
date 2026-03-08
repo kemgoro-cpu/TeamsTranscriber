@@ -5,6 +5,8 @@ Teams会議録画MP4から高精度テキスト + 話者情報付きの文字起
 
 必要なパッケージ:
     pip install faster-whisper python-docx
+話者分離（完全ローカル）: pip install diarize
+話者分離（高精度・pyannote）: pip install pyannote.audio torchcodec ＋ PYANNOTE_SETUP.md の手順
 
 外部依存:
     ffmpeg（PATH上にインストール） — https://ffmpeg.org/
@@ -13,6 +15,12 @@ Teams会議録画MP4から高精度テキスト + 話者情報付きの文字起
     python main.py
 """
 from __future__ import annotations
+
+import warnings
+
+# 依存ライブラリ由来の警告を抑止（pyannote / lightning_fabric）
+warnings.filterwarnings("ignore", message=".*weights_only.*")
+warnings.filterwarnings("ignore", message=".*degrees of freedom.*")
 
 import ctypes
 import subprocess

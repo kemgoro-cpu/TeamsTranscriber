@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from typing import Callable
 
-from config import FFMPEG_CMD, FFMPEG_TIMEOUT
+from .config import FFMPEG_CMD, FFMPEG_TIMEOUT
 
 
 def check_ffmpeg() -> bool:

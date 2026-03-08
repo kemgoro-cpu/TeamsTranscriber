@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from statistics import median
 
-from config import (
+from .config import (
     DETECT_OFFSET_SAMPLE_N,
     DETECT_OFFSET_MIN_RATIO,
     DIARIZATION_SPEAKER_PREFIX,

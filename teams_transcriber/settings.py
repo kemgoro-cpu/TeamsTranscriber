@@ -42,3 +42,7 @@ class AppSettings:
 
     def set(self, key: str, value: Any) -> None:
         self._d[key] = value
+
+    def remove_key(self, key: str) -> None:
+        """設定からキーを削除する（永続化には save() が必要）。"""
+        self._d.pop(key, None)

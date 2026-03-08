@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from config import (
+from .config import (
     WHISPER_LANGUAGE,
     WHISPER_BEAM_SIZE,
     WHISPER_VAD_FILTER,

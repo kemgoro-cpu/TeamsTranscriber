@@ -13,7 +13,7 @@ from typing import Callable
 
 import numpy as np
 
-from config import (
+from .config import (
     DIARIZATION_BACKEND,
     DIARIZATION_MODEL,
     PYANNOTE_EMBEDDING_BATCH_SIZE,

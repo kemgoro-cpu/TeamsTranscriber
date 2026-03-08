@@ -18,3 +18,4 @@ __pycache__/
 last_error.txt
 *.bak
 tests_data/
+.pytest_cache/

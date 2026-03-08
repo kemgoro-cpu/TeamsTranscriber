@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from config import GAP_THRESHOLD_SEC
+from .config import GAP_THRESHOLD_SEC
 from teams_transcriber.synchronizer import SyncedSegment
 
 

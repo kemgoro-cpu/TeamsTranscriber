@@ -1,0 +1,12 @@
+# Teams Transcriber — 必須
+faster-whisper
+python-docx
+
+# 開発・CI（テスト）
+pytest
+
+# 話者分離（オプション）
+# ローカルのみ・HF不要: pip install diarize
+# 高精度・HF要: PYANNOTE_SETUP.md の手順のあと
+#   pip install torch pyannote.audio
+#   (pyannote 3.x と torch 2.5 の組み合わせなら: pip install "pyannote.audio>=3,<4")

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from config import (
+from .config import (
     DIARIZATION_MODEL,
     FFMPEG_CMD,
     SPEAKER_ENROLLMENT_DIR,
@@ -144,7 +144,7 @@ def _load_pyannote_pipeline(hf_token: str):
         _pyannote_pipeline_module.hf_hub_download = _real_hf
         _pyannote_model_module.hf_hub_download = _real_hf
 
-    from config import PYANNOTE_FORCE_CPU
+    from .config import PYANNOTE_FORCE_CPU
     if PYANNOTE_FORCE_CPU or not torch.cuda.is_available():
         pipeline.to(torch.device("cpu"))
     else:

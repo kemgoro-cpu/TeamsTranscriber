@@ -3,7 +3,7 @@
 """
 from __future__ import annotations
 
-from config import OUTPUT_ENCODING
+from .config import OUTPUT_ENCODING
 from teams_transcriber.merger import MergedSegment
 
 
